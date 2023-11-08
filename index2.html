@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Azure Maps GeoTiff Viewer</title>
+    <meta charset="utf-8" />
+    <meta http-equiv="x-ua-compatible" content="IE=Edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+
+    <!-- Add references to the Azure Maps Map control JavaScript and CSS files. -->
+    <link rel="stylesheet" href="https://atlas.microsoft.com/sdk/javascript/mapcontrol/2/atlas.min.css"
+        type="text/css" />
+
+    <style>
+        html,
+        body,
+        #myMap,
+        #loadingScreen {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        .sidePanel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background-color: white;
+            border-radius: 5px;
+            padding: 5px;
+        }
+
+        h1 {
+            font-size: 16px;
+        }
+
+        #loadingScreen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            background-color: rgba(0, 0, 0, 0.5);
+        }
+
+        #loadingScreen span {
+            position: absolute;
+            top: 50%;
+            left: calc(50% - 30px);
+            font-size: 18px;
+            color: white;
+        }
+    </style>
+</head>
+
+<body onload="GetMap()">
+
+    <body onload="GetMap()">
+        <div id="myMap"></div>
+
+        <div class="sidePanel">
+            <h1>Azure Maps GeoTiff Viewer</h1>
+            <table>
+                <tr>
+                    <td>From URL: </td>
+                    <td><input id="urlInput" type="text" value="" /></td>
+                    <td><input type="button" onclick="loadRemoteGeoTiff()" value="Load" /></td>
+                </tr>
+
+                <tr>
+                    <td colspan="3" style="text-align:center">or</td>
+                </tr>
+
+                <tr>
+                    <td>Local file: </td>
+                    <td colspan="2" style="text-align:center">
+                        <input type="file" id="file" onchange="loadLocalGeoTiff()">
+                    </td>
+                </tr>
+            </table>
+        </div>
+
+        <div id="loadingScreen" style="display:none;">
+            <span>Loading...</span>
+        </div>
+    </body>
+
+    <script src="https://atlas.microsoft.com/sdk/javascript/mapcontrol/2/atlas.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/geotiff"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/geotiff-geokeys-to-proj4@2022.9.7/main-dist.min.js"></script>
+
+    <script>
+        var map, imageLayer, datasource, loadingScreen;
+        var geoTiffUrl = 'https://ltimgpstorageacc.blob.core.windows.net/ltimgpblob/no-overviews.tif';
+
+        function GetMap() {
+            loadingScreen = document.getElementById('loadingScreen');
+
+            //Initialize a map instance.
+            map = new atlas.Map('myMap', {
+                view: 'Auto',
+
+                //Add authentication details for connecting to Azure Maps.
+                authOptions: {
+                    authType: 'subscriptionKey',
+                    subscriptionKey: 'dZYkdvDTjnYMNumlAW-PByQ2uAwik1h8Tgo3T_6Xk-g'
+                }
+            });
+
+            //Add some data to the map so that we can see how the rendering of data also changes.
+            map.events.add('ready', function () {
+
+                //Optionally load the style picker control.
+                map.controls.add(new atlas.control.StyleControl({
+                    mapStyles: 'all'
+                }), {
+                    position: 'top-right'
+                });
+
+                //Optionally, create a layer for displaying the bounding box of the GeoTiff.
+                datasource = new atlas.source.DataSource();
+                map.sources.add(datasource);
+
+                map.layers.add(new atlas.layer.LineLayer(datasource, null, {
+                    strokeColor: 'red',
+                    strokeWidth: 5
+                }));
+            });
+        }
+
+        async function loadGeoTiffInChunks(tiff) {
+            // Your existing code logic to remove previous layers, get image metadata, and projection conversion...
+            //Remove any previously loaded image layer.
+            if (imageLayer) {
+                map.layers.remove(imageLayer);
+                datasource.clear();
+            }
+
+            //Get the image data for the tiff.
+            const image = await tiff.getImage();
+
+            const width = image.getWidth();
+            const height = image.getHeight();
+
+            //Get the bounding box of the image.
+            const bounds = image.getBoundingBox();
+
+            if (bounds == null) {
+                alert('No bounding box found in GeoTiff file.');
+                return;
+            }
+
+            //Convert bounding box projection.
+            const geoKeys = image.getGeoKeys();
+            const projObj = geokeysToProj4.toProj4(geoKeys);
+            const projection = proj4('WGS84', projObj.proj4);
+
+            var minXY = projection.inverse([bounds[0], bounds[1]]);
+            var maxXY = projection.inverse([bounds[2], bounds[3]]);
+
+            const bbox = [minXY[0], minXY[1], maxXY[0], maxXY[1]];
+
+            //Zoom the map into where the GeoTiff area.
+            map.setCamera({
+                bounds: bbox,
+                padding: 20
+            });
+
+            //Optionally, draw a polygon around the bounding box area.
+            datasource.setShapes(atlas.math.boundingBoxToPolygon(bbox));
+
+            //Use a decoder pool for faster processing of GeoTiff image.
+            const pool = new GeoTIFF.Pool();
+            // Chunking the image to reduce memory allocation
+            const chunkSize = 512; // Choose an appropriate chunk size
+            const rgbChunks = [];
+            for (let i = 0; i < height; i += chunkSize) {
+                const chunk = await image.readRGB({
+                    pool,
+                    width,
+                    height,
+                    x: 0,
+                    y: i,
+                    width: width,
+                    height: Math.min(chunkSize, height - i)
+                });
+                rgbChunks.push(chunk);
+            }
+
+            // Drawing the image chunks on the canvas
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+
+            const ctx = canvas.getContext('2d');
+            const imageData = ctx.createImageData(width, height);
+
+            let offset = 0;
+            for (const chunk of rgbChunks) {
+                const imageDataChunk = new Uint8ClampedArray(chunk.length * 4);
+
+                for (let i = 0; i < chunk.length; i += 3) {
+                    imageDataChunk[offset++] = chunk[i];
+                    imageDataChunk[offset++] = chunk[i + 1];
+                    imageDataChunk[offset++] = chunk[i + 2];
+                    imageDataChunk[offset++] = 255;
+                }
+
+                imageData.data.set(imageDataChunk, offset - chunk.length * 4);
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+
+            const pngUrl = canvas.toDataURL();
+
+            //Get the corner coordinates of the image.
+            var corners = [
+                [minXY[0], maxXY[1]],   //top left - North west
+                maxXY,                  //top right - North east
+                [maxXY[0], minXY[1]],   //bottom right - South east
+                minXY                   //bottom left - South west
+            ];
+
+            //Create an image layer and add it to the map below the labels.
+            imageLayer = new atlas.layer.ImageLayer({
+                url: pngUrl,
+                coordinates: corners
+            });
+            map.layers.add(imageLayer, 'labels');
+
+            setTimeout(() => {
+                loadingScreen.style.display = 'none';
+            }, 5000)
+            // Display the image layer on the map
+            // ... (your existing code to set up the image layer)
+        }
+
+        async function loadLocalGeoTiff() {
+            loadingScreen.style.display = '';
+            const input = document.getElementById('file');
+            const tiff = await GeoTIFF.fromBlob(input.files[0]);
+            await loadGeoTiffInChunks(tiff);
+        }
+    </script>
+
+
+</html>
